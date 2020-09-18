@@ -858,12 +858,14 @@ def plot_lines(starname, dic, path_plots):
             vecx = d['vecx']
             vecy = d['vecy']
             flux_no_norm = d['flux_no_norm']
-            ax_cont.plot(wave_l, flux_no_norm, lw=0.5, color='black')
+            mean_flux = np.mean(flux_no_norm)
+            ax_cont.plot(wave_l, flux_no_norm - mean_flux + 1.0, lw=0.5, color='black')
             p = d['polinomial']
             xcont = np.linspace(wave_l[0], wave_l[-1], 100)
             ycont = p(xcont)
-            ax_cont.plot(xcont, ycont, lw=0.5, color='steelblue')
-            ax_cont.plot(vecx, vecy, ls='None', marker='x', color='orangered', markersize=1.2)
+            ax_cont.plot(xcont, ycont - mean_flux + 1.0, lw=0.5, color='steelblue')
+            ax_cont.plot(vecx, vecy - mean_flux + 1.0, ls='None', marker='x', color='orangered',
+                         markersize=1.2)
             del vecx, vecy, p, xcont, ycont
 
             # Line
@@ -904,9 +906,12 @@ def plot_lines(starname, dic, path_plots):
             ax_cont.xaxis.set_ticks(np.arange(np.ceil(sx), ex, 1))
             if ex-sx > 6.0:
                 ax_cont.xaxis.set_ticks(np.arange(np.ceil(sx), ex, 2))
-            ax_cont.yaxis.set_ticks(np.linspace(min(flux_no_norm), max(flux_no_norm), 5)[1:])
-            ax_cont.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%d"))
+            ax_cont.yaxis.set_ticks(np.linspace(min(flux_no_norm-mean_flux+1.0),
+                                                max(flux_no_norm-mean_flux+1.0), 5)[1:])
+            ax_cont.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.2f"))
             ax_cont.tick_params(labelsize='x-small', labelbottom=False)
+            if icol == 0:
+                ax_cont.set_ylabel('Flux', fontsize='small')
             del flux_no_norm
 
             sy, ey = ax.get_ylim()
@@ -917,14 +922,14 @@ def plot_lines(starname, dic, path_plots):
             ax.fill_between([midpt-ew50/2.0, midpt+ew50/2.0], [0, 0],
                             [1.0, 1.0], color='g', alpha=0.3, edgecolor='white', lw=0.1)
             ax.text(sx+(ex-sx)/20., sy+(ey-sy)/7.,
-                    'EW$\,=\,%.1f^{+%.1f}_{-%.1f}\,$mA' % (ew50*1000., (ew84-ew50)*1000.,
+                    r'EW$\,=\,%.1f^{+%.1f}_{-%.1f}\,$mA' % (ew50*1000., (ew84-ew50)*1000.,
                                                            (ew50-ew16)*1000.),
                     fontsize='x-small', bbox=dict(facecolor='white', alpha=0.8,
                                                   edgecolor='None', linestyle='None'))
 
             ax.text(ex-(ex-sx)/4, sy+(ey-sy)/6.,
-                    '$A\,=\,%.3f\,\pm\,%.3f$\n$\mu\,=\,%.1f\,\pm\,%.3f$\n'
-                    '$\sigma\,=\,%.3f\,\pm\,%.3f$' %
+                    r'$A\,=\,%.3f\,\pm\,%.3f$''\n'r'$\mu\,=\,%.1f\,\pm\,%.3f$''\n'
+                    r'$\sigma\,=\,%.3f\,\pm\,%.3f$' %
                     (values[0], errors[0], values[1], errors[1], values[2], errors[2]),
                     fontsize='x-small', bbox=dict(facecolor='white', alpha=0.8,
                                                   edgecolor='None', linestyle='None'))
@@ -942,7 +947,7 @@ def plot_lines(starname, dic, path_plots):
 
             ax.tick_params(labelsize='x-small')
             if icol == 0:
-                ax.set_ylabel('Flux', fontsize='small')
+                ax.set_ylabel('Norm. Flux', fontsize='small')
             else:
                 ax.set_ylabel(' ')
             if irow == nrows-1:
