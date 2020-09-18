@@ -5,7 +5,7 @@ Uses regression methods to fit Gaussian-like profiles to the absorption lines, a
 
 For questions and/or suggestions (very welcomed!) please either pull an issue, or contact me at marisotov@gmail.com
 
-If you-re using this module in your research, please cite Soto et al. 2020 (submitted).
+If you're using this module in your research, please cite Soto et al. 2020 (https://arxiv.org/abs/2009.03371).
 
 **Important**
 The spectra has to be shifted to restframe before attempting to
@@ -15,6 +15,7 @@ compute the EWs, otherwise the lines won't be found.
 
 Example:
 
+```python
 import numpy as np
 from astropy.io import fits
 from EWComputation import EW_calc
@@ -28,5 +29,5 @@ flux = data[1]
 snr = header['SNR']
 
 EW_calc('sun01_harps', wave, flux,
-        linelist='linelist.dat', snr=SN, makeplot=True)
-
+        linelist='linelist.dat', snr=snr, makeplot=True)
+```
