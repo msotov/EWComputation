@@ -1,3 +1,99 @@
+"""
+Module to compute the Equivalent Widths (EW) of a set of lines,
+for a given spectrum.
+Uses regression methods to fit Gaussian-like profiles to the
+absorption lines, and outputs the distribution of EWs
+for every line (with a valid fit), based on the fit parameters
+and uncertainties.
+
+**Important**
+The spectra has to be shifted to restframe before attempting to
+compute the EWs, otherwise the lines won't be found.
+
+Usage:
+
+EWComputation.EW_calc(starname, wave, flux,
+                      linelist='linelist.dat',
+                      snr=100., makeplot=False,
+                      path_plots='./EW/plots_EW',
+                      from_dic=False, save_line_data=False)
+
+Input:
+    starname:          Name of the star, after which the output
+                       files will be named.
+
+    wave:              Numpy array.
+                       Wavelength array in Angstroms.
+                       Can be 1D or more, but has to have
+                       the same shape as the flux array.
+
+    flux:              Numpy array.
+                       Flux array.
+                       Can be 1D or more, but has to have
+                       the same shape as the wave array.
+
+    [Optional]
+
+    linelist:          Name of the linelist file containing the
+                       wavelengths of the lines (in angstrom) to be fitted.
+                       Lines must be under the 'WL' column.
+
+    snr:               str or numpy array.
+                       Signal-to-noise (S/N) of the data. It can either
+                       be just a number, or an array. If array,
+                       must have the same dimensions as number of
+                       orders in the wave and flux arrays.
+
+    makeplot:          Boleean.
+                       Generate or not plots with the fits for inspection.
+
+    path_plots:        Str.
+                       Path to save the plots.
+
+    from_dic:          Boleean.
+                       Use the fit parameters from a file. This file must have
+                       been created in a previous run of the code,
+                       using save_line_data=True.
+
+    save_line_data:    Boleean.
+                       Save the line fits to a dictionary file.
+
+Output:
+    EW file:           The output of the code will be a file
+                       (stored under the EW/ directory)
+                       with five columns:
+                       [Wavelength, EW, EW_mean, EW_plus_error, EW_minus_error].
+                       EW refers to the value first computed by the most
+                           probable fit parameters.
+                       EW_mean, EW_plus_error, EW_minus_error:
+                           [50%, 84%-50%, 50%-16%] of the EW distribution
+                           (computed using the parameters estimated for the
+                           Gaussian fit, plus their uncertainties).
+
+    EW plot:           Plot with the Gaussian fits for each line, including
+                       the continuum fit. Generated only if makeplot=True.
+
+
+Example:
+
+import numpy as np
+from astropy.io import fits
+from EWComputation import EW_calc
+
+hdu = fits.open('sun01_harps_res.fits')
+data = hdu[0].data
+header = hdu[0].header
+
+wave = data[0]
+flux = data[1]
+snr = header['SNR']
+
+EW_calc('sun01_harps', wave, flux,
+        linelist='linelist.dat', snr=SN, makeplot=True)
+
+"""
+
+
 from __future__ import print_function
 from __future__ import division
 from builtins import range
@@ -6,12 +102,7 @@ import pickle
 import logging
 import warnings
 import sys
-import cProfile
-import pstats
-from io import StringIO# BytesIO as StringIO
 from dataclasses import dataclass
-from past.utils import old_div
-
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -21,33 +112,16 @@ from astropy.convolution import convolve, Box1DKernel
 from scipy import interpolate
 from scipy.signal import convolve as scipy_convolve
 import scipy.odr as ODR
-from uncertainties import ufloat
 
 warnings.simplefilter("ignore")
-
 plt.style.use(['seaborn-muted'])
 matplotlib.rcParams['mathtext.fontset'] = 'stix'
 matplotlib.rcParams['font.family'] = 'STIXGeneral'
 
 
-def profile(fnc):
-
-    """A decorator that uses cProfile to profile a function"""
-
-    def inner(*args, **kwargs):
-
-        pr = cProfile.Profile()
-        pr.enable()
-        retval = fnc(*args, **kwargs)
-        pr.disable()
-        s = StringIO()
-        sortby = pstats.SortKey.CUMULATIVE# 'cumulative'
-        ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-        ps.print_stats()
-        print(s.getvalue())
-        return retval
-
-    return inner
+__author__ = "Maritza Soto (marisotov@gmail.com)"
+__date__ = "2020-09-18"
+__version__ = "2.0.0"
 
 
 @dataclass
@@ -72,32 +146,28 @@ class gaussian:
         self.m = m
         self.s = s
 
-    def seterr(self, a, m, s):
-        self.err_a = a
-        self.err_m = m
-        self.err_s = s
+    def seterr(self, e_a, e_m, e_s):
+        self.err_a = e_a
+        self.err_m = e_m
+        self.err_s = e_s
 
     def EW(self, x, cdelt):
-        #integral,_ = integrate.quad(lambda c: self.__call__(c), min(x), max(x))
         integral = self(x).sum()
-
         return -integral*cdelt*1000.0
-        #return -integral*1000.0
 
     def EWdist(self, x, a, m, s, cdelt=None):
-        EW = []
         n = a.size
+        EW = np.ones(n)*np.nan
         if cdelt is None:
             cdelt = np.median(x[1:]-x[:-1])
         for i in range(n):
             self.set(a[i], m[i], s[i])
-            EW.append(self.EW(x, cdelt))
-
-        EW = np.array(EW)
+            EW[i] = self.EW(x, cdelt)
         inonan = np.where(~np.isnan(EW))[0]
         return EW[inonan]
 
-    def distribution_fit(self, x, a, m, s):
+    @staticmethod
+    def distribution_fit(x, a, m, s):
         n = a.size
         y = np.zeros((n, x.size))
         y16 = np.zeros(x.size)
@@ -105,13 +175,12 @@ class gaussian:
         y84 = np.zeros(x.size)
 
         for i in range(n):
-            self.set(a[i], m[i], s[i])
-            y[i] = self.__call__(x)
+            y[i] = a[i]*np.exp(-(x-m[i])**2./(2.*s[i]**2.))
 
         yT = y.T
         for i in range(x.size):
             y16[i], y50[i], y84[i] = np.percentile(yT[i], [16, 50, 84])
-
+        del y, yT
         return y16, y50, y84
 
 
@@ -164,13 +233,15 @@ class Spectrum:
         self.line = line
         self.wave = wave
         self.flux = flux
+        if np.min(flux) < 0.0:
+            self.flux = flux - np.min(flux)
         self.snr = snr
         self.rejt = 1.-1./snr
         self.is_visible = True
         self.flux_norm = np.ones(self.flux.size)*np.nan
         self.width = None
         self.dxarr = np.ones(wave.size)*np.nan
-        
+
     def make_dxarr(self, coordinate_location='center'):
         dxarr = np.diff(self.wave)
         if self.wave.size <= 2:
@@ -185,7 +256,7 @@ class Spectrum:
             self.make_dxarr()
         if approx or abs(self.dxarr.max()-self.dxarr.min())/abs(self.dxarr.min()) < tolerance:
             return self.dxarr.mean().flat[0]
-        return np.mean(self.wave[1:]-self.wave[:-1])   
+        return np.mean(self.wave[1:]-self.wave[:-1])
 
     def check_data(self):
         wave_right = self.wave[np.where(self.wave <= self.line)[0]]
@@ -266,7 +337,7 @@ class Spectrum:
             ynorm = p(x)
             if ii == 0 and detect_emission:
                 lines_em, _ = self._find_emission_lines(x, y/ynorm-1.0,
-                                                             flux_threshold=0.09/self.rejt**2.)
+                                                        flux_threshold=0.09/self.rejt**2.)
                 if len(lines_em) > 0:
                     yy = vecy/p(vecx)-1.0
                     i_ex = []
@@ -294,7 +365,7 @@ class Spectrum:
                             p = np.poly1d(np.polyfit(vecx, vecy, order))
                             ynorm = p(x_no_ab)
                         break
-        
+
         yfit = p(x)
         del ynorm
 
@@ -302,12 +373,12 @@ class Spectrum:
             i_nonzero = np.where(y > (min(y) + 0.05*(max(y)-min(y))))[0]
             xmed = min(x) + (max(x)-min(x))*0.5
             i_in_line = np.where((x >= (xmed-1.0)) & (x <= (xmed+1.0)))[0]
-        
+
             if np.any(np.isin(i_in_line, i_nonzero)):
                 logging.info('line not visible')
                 yfit = np.zeros(len(y))
                 self.is_visible = False
-            
+
             del i_nonzero, i_in_line
 
         self.flux_norm = y/yfit-1.0
@@ -316,7 +387,6 @@ class Spectrum:
 
 
     def detect_lines(self):
-
         wave, flux = self.data_norm
         # Select only the regions where the spectra is larger than -1
         ivalid = np.where(flux > -1.0)[0]
@@ -326,7 +396,7 @@ class Spectrum:
             ysmooth = convolve(gradient, Box1DKernel(3))
             if n == 1:
                 tckn = interpolate.UnivariateSpline(wave[ivalid], ysmooth, k=5, s=0)
-                
+
         tck = interpolate.UnivariateSpline(wave[ivalid], ysmooth, k=3, s=0)
         zeros = tck.roots()
         flux_zeros = interpolate.UnivariateSpline(wave[ivalid], flux[ivalid], k=5, s=0)(zeros)
@@ -352,7 +422,7 @@ class Spectrum:
 
         return np.where(np.isnan(ycopy))[0]
 
-    
+
     def fit_gauss(self, guess=None, exc_list=None, lines=None):
         x, y = self.data_norm
         if self.width is not None:
@@ -404,7 +474,7 @@ class Spectrum:
         myoutput = myodr.run()
         s_rw = myoutput.beta
         del func, mydata, myodr, myoutput
-        
+
         func = ODR.Model(fgauss2)
         mydata = ODR.Data(x=xcopy[ivalid], y=ycopy[ivalid])
         myodr = ODR.ODR(mydata, func, beta0=guess)
@@ -415,7 +485,7 @@ class Spectrum:
 
         return s_rw, e_s_rw
 
-    
+
     def guess(self, lines=None):
         x, y = self.data_norm
         tck = interpolate.UnivariateSpline(x, y, s=0, k=5)
@@ -433,6 +503,9 @@ class Spectrum:
 
 
 def EW_for_line(l, wave_l, flux_l, rejt, snr_o):
+    if snr_o < 20.:
+        snr_o = 20.0
+        rejt = 1.-1./snr_o
     try:
         sp = Spectrum(l, wave_l, flux_l, snr_o)
         if sp.check_data() is False:
@@ -447,6 +520,7 @@ def EW_for_line(l, wave_l, flux_l, rejt, snr_o):
             inoinf = np.where(~np.isinf(y))[0]
             x = x[inoinf]
             y = y[inoinf]
+            del inoinf
         if np.all(np.isnan(y)) or np.all(np.isinf(y)):
             del sp, x, y, vecx, vecy
             print('\t\t\tLine %.2f has some invalid datapoints. Skipping.' % l)
@@ -460,10 +534,12 @@ def EW_for_line(l, wave_l, flux_l, rejt, snr_o):
         dicl['vecx'] = vecx
         dicl['vecy'] = vecy
         dicl['polinomial'] = p
-        dicl['flux_no_norm'] = flux_l
-        
-        #lines = sp.detect_lines()
+        dicl['flux_no_norm'] = sp.flux
+
         lines, _ = sp._find_absorption_lines(flux_threshold=0.04, width=2.0)
+        if len(np.where(np.abs(lines-l) <= 0.10)[0]) > 1:
+            ii = np.where(np.abs(lines-l) > 0.10)[0]
+            lines = lines[ii]
         if ~np.any(np.abs(lines-l) < 0.1):
             lines = np.append(lines, l)
             isort = np.argsort(lines)
@@ -553,7 +629,7 @@ def EW_for_line(l, wave_l, flux_l, rejt, snr_o):
         dicl['lines'] = lines
         dicl['iline'] = iline
         dicl['dist_params'] = [dist_a, dist_m, dist_s]
-        dicl['full_model'] = g(x, *popt) 
+        dicl['full_model'] = g(x, *popt)
 
         p = np.percentile(EWdist, [16, 50, 84])
         final_eqws_mean = p[1]
@@ -575,17 +651,17 @@ def EW_for_line(l, wave_l, flux_l, rejt, snr_o):
         return l, 0.0, 0.0, 0.0, 0.0, {}
 
 
-def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=True,
+def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=False,
             path_plots='./EW/plots_EW',
             from_dic=False, save_line_data=False):
-    
+
     print('\t\tCreating EW file for %s' % starname)
     if (from_dic is False) or os.path.isfile('EW/%s_line_data.pkl' % starname) is False:
 
         norders = wave.ndim
 
         # Select the lines
-        lines = ascii.read('Spectra/%s' % linelist, comment='-')['WL']
+        lines = ascii.read('%s' % linelist, comment='-')['WL']
 
         # Arrays to store the results for each line
         final_eqws = np.zeros(len(lines))
@@ -609,7 +685,7 @@ def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=Tr
                 if len(wave_l) == 0:
                     logging.warning('Line not found in spectrum.')
                     continue
-        
+
             else:
                 iline_coords = np.where((wave > l-space) & (wave < l+space))
                 # Check is the line is present in more than one order
@@ -656,7 +732,7 @@ def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=Tr
                     logging.info('Line in just one order')
                     wave_l = wave[iline_coords]
                     flux_l = flux[iline_coords]
-                
+
                     if wave_l.size == 0:
                         logging.warning('Line not found in spectrum')
                         continue
@@ -668,7 +744,7 @@ def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=Tr
                     else:
                         rejt = 1.-(1./snr)
                         snr_o = snr
-                    
+
                 del iline_coords
 
             if hasattr(snr_o, "__len__"):
@@ -679,6 +755,7 @@ def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=Tr
             if snr_o > 500.:
                 snr_o = 500.0
                 rejt = 1.-(1./snr_o)
+
 
             l, final_eqw, final_eqw_mean, final_eqw_err1, final_eqw_err2, dicl = EW_for_line(l,
                                                                                              wave_l,
@@ -710,11 +787,12 @@ def EW_calc(starname, wave, flux, linelist='linelist.dat', snr=100., makeplot=Tr
 
     if makeplot:
         plot_lines(starname, dic, path_plots)
-            
+
     del dic
 
 
-def plot_lines(starname, dic, path_plots, plot_ares=False):
+
+def plot_lines(starname, dic, path_plots):
 
     class PlotGrid:
 
@@ -747,7 +825,7 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
 
         def finish_plot(self, starname):
             if self.islines:
-                self.fig.subplots_adjust(bottom=1./(self.nrows*4), top=1-1./(self.nrows*6), 
+                self.fig.subplots_adjust(bottom=1./(self.nrows*4), top=1-1./(self.nrows*6),
                                          left=0.015, right=0.99, wspace=0.1)
                 self.fig.savefig(os.path.join(os.path.relpath(self.path_plots, '.'),
                                               '%s.pdf' % starname), format='pdf')
@@ -763,15 +841,6 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
 
         LinesPlot = PlotGrid(ncols, nrows, path_plots=path_plots, islines=True)
         ErrorPlot = PlotGrid(ncols, nrows, path_plots=path_plots, islines=False)
-
-        if plot_ares:
-            ares_exists = False
-            # Check if the ares data exists
-            if os.path.isfile('EW/%s.ares' % starname):
-                ares_exists = True
-                data_ares = ascii.read('EW/%s.ares' % starname,
-                                       names=['l', 'n', 'd', 'fwhm', 'ew', 'err_ew',
-                                              'depth', 'sigma', 'center'])
 
         for i, l in enumerate(lines):
             d = dic[l]
@@ -805,7 +874,7 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
             xfit = np.hstack((np.linspace(min(wave_l), float(l)-1.0, 50),
                               np.linspace(float(l)-1.0, float(l)+1.0, 200),
                               np.linspace(float(l)+1.0, max(wave_l), 50)))
-            yfit = values[0]*np.exp(old_div(-(xfit-values[1])**2, (2.0*values[2]**2)))
+            yfit = values[0]*np.exp(-(xfit-values[1])**2/ (2.0*values[2]**2))
             ax.plot(xfit, yfit+1.0, color='steelblue', lw=0.5)
             yfit16, yfit50, yfit84 = plot_fit_distribution(xfit, values, errors)
             ax.fill_between(xfit, yfit16+1.0, y2=yfit50+1.0,
@@ -826,24 +895,9 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
                     alpha=0.5,
                     lw=0.5) for l_ in d['lines']]
 
-            # Plot the fit from ares
-            if plot_ares:
-                if ares_exists:
-                    if float(l) in data_ares['l']:
-                        iares = np.where(data_ares['l'] == float(l))[0]
-                        if len(iares) > 1:
-                            iares = iares[0]
-                        a_ares = data_ares['depth'][iares]
-                        fwhm_ares = data_ares['fwhm'][iares]
-                        m_ares = data_ares['center'][iares]
-                        s_ares = fwhm_ares/(2*np.sqrt(2*np.log(2)))
-                        #print(a_ares, fwhm_ares, m_ares, s_ares)
-                        ax.plot(wave_l, a_ares*np.exp(-(wave_l-m_ares)**2./(2*s_ares**2))+1.0,
-                                lw=0.3, color='cyan')
-
 
             # Set limits, label sizes, number of ticks, and text to be added
-            
+
             sx, ex = min(wave_l), max(wave_l)
             sy, ey = ax_cont.get_ylim()
             ax_cont.set_xlim(sx, ex)
@@ -863,18 +917,18 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
             ax.fill_between([midpt-ew50/2.0, midpt+ew50/2.0], [0, 0],
                             [1.0, 1.0], color='g', alpha=0.3, edgecolor='white', lw=0.1)
             ax.text(sx+(ex-sx)/20., sy+(ey-sy)/7.,
-                    'EW$\,=\,%.1f^{+%.1f}_{-%.1f}\,$mA' % (ew50*1000., (ew84-ew50)*1000., 
+                    'EW$\,=\,%.1f^{+%.1f}_{-%.1f}\,$mA' % (ew50*1000., (ew84-ew50)*1000.,
                                                            (ew50-ew16)*1000.),
                     fontsize='x-small', bbox=dict(facecolor='white', alpha=0.8,
                                                   edgecolor='None', linestyle='None'))
-                
+
             ax.text(ex-(ex-sx)/4, sy+(ey-sy)/6.,
                     '$A\,=\,%.3f\,\pm\,%.3f$\n$\mu\,=\,%.1f\,\pm\,%.3f$\n'
-                    '$\sigma\,=\,%.3f\,\pm\,%.3f$' % 
-                    (values[0], errors[0], values[1], errors[1], values[2], errors[2]), 
+                    '$\sigma\,=\,%.3f\,\pm\,%.3f$' %
+                    (values[0], errors[0], values[1], errors[1], values[2], errors[2]),
                     fontsize='x-small', bbox=dict(facecolor='white', alpha=0.8,
                                                   edgecolor='None', linestyle='None'))
-            
+
             ax.set_ylim(max(sy, 0.0), min(1.30, ey))
             ax.set_xlim(sx, ex)
 
@@ -898,7 +952,7 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
             else:
                 ax.set_xlabel(' ')
 
-            ####### Plot the error distributions ######## 
+            ####### Plot the error distributions ########
 
             ax_err, irow, icol = ErrorPlot(i)
 
@@ -913,18 +967,6 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
             ax_err.xaxis.set_ticks(np.linspace(start_x, end_x, 5))
             ax_err.axvline(ew*1000., color='orangered')
 
-            # error from ares
-            s_i = ufloat(values[2], errors[2])
-            chi_i = 1./(2.*s_i**2.)
-            chi = chi_i.n
-            err_chi = chi_i.s
-            cdelt = np.median(wave_l[1:] - wave_l[:-1])
-            ew_from_pars = -values[0]*np.exp(-chi*(wave_l-values[1])**2.).sum()*cdelt
-            err_d_from_pars = ew_from_pars*(errors[0]/values[0]+0.5*err_chi/chi)
-            ax_err.axvline(ew_from_pars*1000.0+err_d_from_pars*1000.0, color='olive')
-            ax_err.axvline(ew_from_pars*1000.0-err_d_from_pars*1000.0, color='olive')
-            ax_err.axvline(ew_from_pars*1000.0, color='olive')
-
             del wave_l, flux_l, d
 
         LinesPlot.finish_plot(starname)
@@ -932,7 +974,7 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
 
         plt.close('all')
         del LinesPlot, ErrorPlot
-            
+
     except Exception as e:
         logging.error('Error while plotting:')
         _, _, exc_tb = sys.exc_info()
@@ -941,24 +983,20 @@ def plot_lines(starname, dic, path_plots, plot_ares=False):
 
 
 def plot_fit_distribution(wave, parvalues, parerrors):
-    def fit_for_par(w, p):
-        return p[0]*np.exp(old_div(-(w-p[1])**2, (2.0*p[2]**2)))
-
     n = 1000
     y = np.zeros((n, wave.size))
     y16 = np.zeros(wave.size)
     y50 = np.zeros(wave.size)
     y84 = np.zeros(wave.size)
-    a_dist = np.random.normal(parvalues[0], parerrors[0], n)
-    m_dist = np.random.normal(parvalues[1], parerrors[1], n)
-    s_dist = np.random.normal(parvalues[2], parerrors[2], n)
+    a = np.random.normal(parvalues[0], parerrors[0], n)
+    m = np.random.normal(parvalues[1], parerrors[1], n)
+    s = np.random.normal(parvalues[2], parerrors[2], n)
 
     for i in range(n):
-        y[i] = fit_for_par(wave, [a_dist[i], m_dist[i], s_dist[i]])
+        y[i] = a[i]*np.exp(-(wave-m[i])**2./(2.*s[i]**2.))
 
     yT = y.T
     for i in range(wave.size):
         y16[i], y50[i], y84[i] = np.percentile(yT[i], [16, 50, 84])
-
+    del y, a, m, s, yT
     return y16, y50, y84
-
