@@ -32,6 +32,6 @@ EW_calc('sun01_harps', wave, flux,
         linelist='linelist.dat', snr=snr, makeplot=True)
 ```
 
-The plots created (if you use makeplot=True) look like this:
+The plots created (if you use `makeplot=True) look like this:
 
 ![Image of Line Fitting](image.png)
